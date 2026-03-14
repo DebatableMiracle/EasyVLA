@@ -185,7 +185,7 @@ train VLA policy
 evaluate robot behavior
 ```
 
-Initial experiments will focus on single-task learning using the **push-v2** environment.
+Initial experiments will focus on single-task learning using the **push-v3** environment.
 
 ---
 

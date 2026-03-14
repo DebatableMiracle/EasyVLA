@@ -4,7 +4,7 @@ import torch.nn as nn
 class TextEncoderDistilbert(nn.Module):
     def __init__(self, d_model = 256):
         super().__init__()
-        self.backbone = DistilbertModel.from_pretrained("distilbert-base-uncased")
+        self.backbone = DistilBertModel.from_pretrained("distilbert-base-uncased")
 
         #freeze all the layers
         for p in self.backbone.parameters():

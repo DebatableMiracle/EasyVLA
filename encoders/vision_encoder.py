@@ -20,6 +20,8 @@ class VisionEncoderResnet18(nn.Module):
 
         for p in self.backbone.parameters():
             p.requires_grad = False
+        for p in self.backbone[-2].parameters():
+            p.requires_grad = True
         for p in self.backbone[-1].parameters():
             p.requires_grad = True
 

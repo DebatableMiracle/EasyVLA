@@ -9,7 +9,7 @@ class FusionTransformer(nn.Module):
         self.cls_token = nn.Parameter(torch.randn(1, 1, d_model))
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
-            n_head=n_heads,
+            nhead=n_heads,
             dim_feedforward= 4*d_model,
             batch_first=True,
             norm_first=True,
