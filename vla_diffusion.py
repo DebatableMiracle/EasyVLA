@@ -55,3 +55,4 @@ class VlaDiffusion(nn.Module):
             cond = self.encode_observations(image, input_ids, attention_mask, state)
             actions = self.diffusion_head.sample(cond)
             return actions
+
