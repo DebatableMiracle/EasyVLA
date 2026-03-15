@@ -6,10 +6,12 @@ class StateEncoderMLP(nn.Module):
         super().__init__()
 
         self.net = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, d_model),
-            nn.ReLU(),
+            nn.Linear(state_dim, 256),   # was 128
+            nn.SiLU(),                   # was ReLU
+            nn.Linear(256, 256),         # extra layer
+            nn.SiLU(),
+            nn.Linear(256, d_model),
+            nn.SiLU(),
         )
 
         self.layernorm = nn.LayerNorm(d_model)

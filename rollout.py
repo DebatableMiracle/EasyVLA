@@ -9,10 +9,11 @@ MODEL_PATH     = "checkpoints/best.pt"
 STATE_DIM      = 39
 ACTION_DIM     = 4
 D_MODEL        = 256
-ACTION_HORIZON = 16           # NEW: must match training
+ACTION_HORIZON = 8
 INSTRUCTION    = "reach the target"
-MAX_STEPS      = 200
-EPISODES       = 10
+MAX_STEPS      = 400
+EPISODES       = 50
+OBS_HORIZON    = 2
 
 
 def load_model():
@@ -21,6 +22,7 @@ def load_model():
         action_dim=ACTION_DIM,
         d_model=D_MODEL,
         action_horizon=ACTION_HORIZON,
+        obs_horizon=OBS_HORIZON,
     ).to(DEVICE)
     ckpt = torch.load(MODEL_PATH, map_location=DEVICE)
     model.load_state_dict(ckpt["model"])
@@ -40,9 +42,7 @@ def run_episode(env, model, text_ids, text_mask):
 
         with torch.no_grad():
             action_chunk = model.act(image.to(DEVICE), text_ids, text_mask, state.to(DEVICE))
-            # action_chunk: (1, H, action_dim)
 
-        # execute all H actions open-loop before re-planning
         for h in range(ACTION_HORIZON):
             if done or step >= MAX_STEPS:
                 break

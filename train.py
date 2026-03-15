@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+import wandb
 
 from vla_diffusion import VlaDiffusion
 from utils.tokenizer import tokenize_instruction
@@ -16,9 +17,11 @@ LR             = 1e-4
 STATE_DIM      = 39
 ACTION_DIM     = 4
 D_MODEL        = 256
-ACTION_HORIZON = 16
+ACTION_HORIZON = 8
 INSTRUCTION    = "reach the target"
 VAL_SPLIT      = 0.1
+WANDB_PROJECT  = "vla-from-scratch"        # change to your project name
+OBS_HORIZON    = 2
 
 
 class DemoDataset(Dataset):
@@ -28,7 +31,7 @@ class DemoDataset(Dataset):
         self.actions = np.load("data/actions.npy", mmap_mode="r")
         self.indices = indices
 
-    def __len__(self):                              # FIX: was missing
+    def __len__(self):
         return len(self.indices)
 
     def __getitem__(self, idx):
@@ -53,6 +56,8 @@ def make_loaders(val_split, batch_size):
     return train_loader, val_loader
 
 
+from tqdm import tqdm
+
 def run_epoch(model, loader, text_ids, text_mask, optimizer=None):
     is_train = optimizer is not None
     model.train() if is_train else model.eval()
@@ -61,7 +66,8 @@ def run_epoch(model, loader, text_ids, text_mask, optimizer=None):
     ctx = torch.enable_grad() if is_train else torch.no_grad()
 
     with ctx:
-        for img, state, act in loader:
+        pbar = tqdm(loader, desc="train" if is_train else "val  ", leave=False)
+        for img, state, act in pbar:
             img   = img.to(DEVICE)
             state = state.to(DEVICE)
             act   = act.to(DEVICE)
@@ -79,25 +85,42 @@ def run_epoch(model, loader, text_ids, text_mask, optimizer=None):
                 optimizer.step()
 
             total_loss += loss.item()
+            pbar.set_postfix(loss=f"{loss.item():.4f}")  # shows current batch loss too
 
     return total_loss / len(loader)
-
 
 def main():
     os.makedirs(SAVE_DIR, exist_ok=True)
 
+    wandb.init(
+        project=WANDB_PROJECT,
+        config={
+            "epochs":         EPOCHS,
+            "batch_size":     BATCH_SIZE,
+            "lr":             LR,
+            "state_dim":      STATE_DIM,
+            "action_dim":     ACTION_DIM,
+            "d_model":        D_MODEL,
+            "action_horizon": ACTION_HORIZON,
+            "instruction":    INSTRUCTION,
+        }
+    )
+
     print("Loading data...")
-    train_loader, val_loader = make_loaders(VAL_SPLIT, BATCH_SIZE)  # FIX: removed load_data
+    train_loader, val_loader = make_loaders(VAL_SPLIT, BATCH_SIZE)
+
 
     model = VlaDiffusion(
         state_dim=STATE_DIM,
         action_dim=ACTION_DIM,
         d_model=D_MODEL,
         action_horizon=ACTION_HORIZON,
-    ).to(DEVICE)
+        obs_horizon=OBS_HORIZON,
+        ).to(DEVICE)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable params: {n_params:,}")
+    wandb.config.update({"trainable_params": n_params})
 
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
@@ -109,20 +132,37 @@ def main():
         train_loss = run_epoch(model, train_loader, text_ids, text_mask, optimizer)
         val_loss   = run_epoch(model, val_loader,   text_ids, text_mask)
         scheduler.step()
+        lr = scheduler.get_last_lr()[0]
 
-        print(f"Epoch {epoch+1:03d}/{EPOCHS} | train {train_loss:.4f} | val {val_loss:.4f} | lr {scheduler.get_last_lr()[0]:.2e}")
+        print(f"Epoch {epoch+1:03d}/{EPOCHS} | train {train_loss:.4f} | val {val_loss:.4f} | lr {lr:.2e}")
+
+        wandb.log({
+            "train/loss": train_loss,
+            "val/loss":   val_loss,
+            "lr":         lr,
+            "epoch":      epoch + 1,
+        })
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save({
-                "epoch": epoch,
-                "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "val_loss": val_loss,
-            }, os.path.join(SAVE_DIR, "best.pt"))
+            ckpt = {
+                "epoch":      epoch,
+                "model":      model.state_dict(),
+                "optimizer":  optimizer.state_dict(),
+                "val_loss":   val_loss,
+                "config": {
+                    "state_dim":      STATE_DIM,
+                    "action_dim":     ACTION_DIM,
+                    "d_model":        D_MODEL,
+                    "action_horizon": ACTION_HORIZON,
+                }
+            }
+            torch.save(ckpt, os.path.join(SAVE_DIR, "best.pt"))
+            wandb.log({"best_val_loss": val_loss})
             print(f"  ✓ saved best checkpoint (val {val_loss:.4f})")
 
     torch.save(model.state_dict(), os.path.join(SAVE_DIR, "final.pt"))
+    wandb.finish()
     print("Done.")
 
 

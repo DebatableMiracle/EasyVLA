@@ -7,9 +7,9 @@ import torch.nn.functional as F
 
 @dataclass
 class DiffusionConfig:
-    T: int = 32
+    T: int = 64
     beta_start: float = 1e-4
-    beta_end: float = 1e-2
+    beta_end: float = 2e-2
     action_dim: int = 4
     action_horizon: int = 16    # we predict H actions at once resulting in a more stable policy. 
     cond_dim: int = 256

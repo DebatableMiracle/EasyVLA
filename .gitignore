@@ -221,4 +221,9 @@ __marimo__/
 #checkpoints
 checkpoints/*
 
+#wandb
+wandb/*
 
+
+
+testcode.py
