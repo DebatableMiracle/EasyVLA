@@ -217,6 +217,7 @@ __marimo__/
 
 # Dataset
 *.npz   
+*.npy
 #checkpoints
 checkpoints/*
 

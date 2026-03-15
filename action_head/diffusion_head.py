@@ -1,4 +1,3 @@
-
 import math
 from dataclasses import dataclass
 import torch
@@ -8,11 +7,12 @@ import torch.nn.functional as F
 
 @dataclass
 class DiffusionConfig:
-    T: int = 16
+    T: int = 32
     beta_start: float = 1e-4
     beta_end: float = 1e-2
     action_dim: int = 4
-    cond_dim: int = 256     
+    action_horizon: int = 16    # we predict H actions at once resulting in a more stable policy. 
+    cond_dim: int = 256
 
 
 def make_beta_schedule(cfg: DiffusionConfig):
@@ -41,19 +41,22 @@ class SinusoidalTimeEmbedding(nn.Module):
 
 
 class ActionDenoiseModel(nn.Module):
-    def __init__(self, cfg: DiffusionConfig, time_emb_dim=32, hidden_dim=128):
+    def __init__(self, cfg: DiffusionConfig, time_emb_dim=32, hidden_dim=256):  # wider for chunk
         super().__init__()
         self.cfg = cfg
         self.time_emb = SinusoidalTimeEmbedding(time_emb_dim)
 
-        in_dim = cfg.action_dim + time_emb_dim + cfg.cond_dim
+        chunk_dim = cfg.action_dim * cfg.action_horizon  
+        in_dim = chunk_dim + time_emb_dim + cfg.cond_dim
 
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
-            nn.Linear(hidden_dim, cfg.action_dim),
+            nn.Linear(hidden_dim, hidden_dim), 
+            nn.SiLU(),
+            nn.Linear(hidden_dim, chunk_dim),
         )
 
     def forward(self, x_t, t, cond):
@@ -62,7 +65,7 @@ class ActionDenoiseModel(nn.Module):
         return self.net(x)
 
 
-class DiffusionHead(nn.Module):         
+class DiffusionHead(nn.Module):
     def __init__(self, cfg: DiffusionConfig):
         super().__init__()
         self.cfg = cfg
@@ -77,36 +80,32 @@ class DiffusionHead(nn.Module):
         return torch.sqrt(alpha_bar_t) * x0 + torch.sqrt(1 - alpha_bar_t) * noise
 
     def loss(self, actions, cond):
+        # actions: (B, action_horizon, action_dim)
         B = actions.size(0)
-        device = actions.device
-        t = torch.randint(0, self.cfg.T, (B,), device=device)
-        noise = torch.randn_like(actions)
-        x_t = self.q_sample(actions, t, noise)
+        actions_flat = actions.view(B, -1)              # (B, action_horizon * action_dim)
+        t = torch.randint(0, self.cfg.T, (B,), device=actions.device)
+        noise = torch.randn_like(actions_flat)
+        x_t = self.q_sample(actions_flat, t, noise)
         eps_pred = self.denoise_model(x_t, t, cond)
         return F.mse_loss(eps_pred, noise)
 
     @torch.no_grad()
-    def sample(self, cond, n_samples=None):
+    def sample(self, cond):
         self.eval()
-        B = cond.size(0) if n_samples is None else n_samples
-        if n_samples is not None:
-            cond = cond.expand(B, -1)
-
-        x_t = torch.randn(B, self.cfg.action_dim, device=cond.device)
+        B = cond.size(0)
+        chunk_dim = self.cfg.action_dim * self.cfg.action_horizon
+        x_t = torch.randn(B, chunk_dim, device=cond.device)
 
         for t_step in reversed(range(self.cfg.T)):
             t = torch.full((B,), t_step, device=cond.device, dtype=torch.long)
             eps_pred = self.denoise_model(x_t, t, cond)
-
             beta_t      = self.betas[t_step]
             alpha_bar_t = self.alpha_bar[t_step]
-            alpha_t     = self.alphas[t_step]  
-
+            alpha_t     = self.alphas[t_step]
             x0_pred = (x_t - torch.sqrt(1 - alpha_bar_t) * eps_pred) / torch.sqrt(alpha_bar_t)
             if t_step > 0:
-                noise = torch.randn_like(x_t)
-                x_t = torch.sqrt(alpha_t) * x0_pred + torch.sqrt(beta_t) * noise
+                x_t = torch.sqrt(alpha_t) * x0_pred + torch.sqrt(beta_t) * torch.randn_like(x_t)
             else:
                 x_t = x0_pred
 
-        return x_t
+        return x_t.view(B, self.cfg.action_horizon, self.cfg.action_dim)  # (B, H, action_dim)

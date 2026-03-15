@@ -1,4 +1,3 @@
-#this one is kinda claude honestly, the script is good to go so you can try it out
 import os
 import numpy as np
 import torch
@@ -9,64 +8,52 @@ from torch.utils.data import Dataset, DataLoader
 from vla_diffusion import VlaDiffusion
 from utils.tokenizer import tokenize_instruction
 
-# ── config ────────────────────────────────────────────────────────────────────
-DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
-DATA_PATH   = "data/reach_v3_demos.npz"
-SAVE_DIR    = "checkpoints"
-EPOCHS      = 20
-BATCH_SIZE  = 64
-LR          = 1e-4
-STATE_DIM   = 39
-ACTION_DIM  = 4
-D_MODEL     = 256
-INSTRUCTION = "reach the target"
-VAL_SPLIT   = 0.1
-# ──────────────────────────────────────────────────────────────────────────────
+DEVICE         = "cuda" if torch.cuda.is_available() else "cpu"
+SAVE_DIR       = "checkpoints"
+EPOCHS         = 100
+BATCH_SIZE     = 64
+LR             = 1e-4
+STATE_DIM      = 39
+ACTION_DIM     = 4
+D_MODEL        = 256
+ACTION_HORIZON = 16
+INSTRUCTION    = "reach the target"
+VAL_SPLIT      = 0.1
 
 
 class DemoDataset(Dataset):
-    def __init__(self, images, states, actions):
-        self.images  = images
-        self.states  = states
-        self.actions = actions
+    def __init__(self, indices):
+        self.images  = np.load("data/images.npy",  mmap_mode="r")
+        self.states  = np.load("data/states.npy",  mmap_mode="r")
+        self.actions = np.load("data/actions.npy", mmap_mode="r")
+        self.indices = indices
 
-    def __len__(self):
-        return len(self.actions)
+    def __len__(self):                              # FIX: was missing
+        return len(self.indices)
 
     def __getitem__(self, idx):
-        return self.images[idx], self.states[idx], self.actions[idx]
+        i      = self.indices[idx]
+        image  = torch.tensor(self.images[i].copy()).permute(2, 0, 1).float() / 255.0
+        state  = torch.tensor(self.states[i].copy()).float()
+        action = torch.tensor(self.actions[i].copy()).float()
+        return image, state, action
 
 
-def load_data(path):
-    data    = np.load(path)
-    images  = torch.tensor(data["images"]).permute(0, 3, 1, 2).float() / 255.0
-    states  = torch.tensor(data["states"]).float()
-    actions = torch.tensor(data["actions"]).float()
-    return images, states, actions
-
-
-def make_loaders(images, states, actions, val_split, batch_size):
-    N       = len(actions)
+def make_loaders(val_split, batch_size):
+    N       = np.load("data/images.npy", mmap_mode="r").shape[0]
     n_val   = int(N * val_split)
     n_train = N - n_val
+    indices = np.arange(N)
+    print(f"Train: {n_train} | Val: {n_val}")
 
-    # reproducible split — no random shuffle so episodes stay contiguous
-    train_ds = DemoDataset(images[:n_train], states[:n_train], actions[:n_train])
-    val_ds   = DemoDataset(images[n_train:], states[n_train:], actions[n_train:])
-
-    train_loader = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True,
-        num_workers=4, pin_memory=True
-    )
-    val_loader = DataLoader(
-        val_ds, batch_size=batch_size, shuffle=False,
-        num_workers=4, pin_memory=True
-    )
+    train_loader = DataLoader(DemoDataset(indices[:n_train]), batch_size=batch_size,
+                              shuffle=True,  num_workers=4, pin_memory=True)
+    val_loader   = DataLoader(DemoDataset(indices[n_train:]), batch_size=batch_size,
+                              shuffle=False, num_workers=4, pin_memory=True)
     return train_loader, val_loader
 
 
 def run_epoch(model, loader, text_ids, text_mask, optimizer=None):
-    """Shared logic for train and val. Pass optimizer=None for eval."""
     is_train = optimizer is not None
     model.train() if is_train else model.eval()
 
@@ -100,16 +87,13 @@ def main():
     os.makedirs(SAVE_DIR, exist_ok=True)
 
     print("Loading data...")
-    images, states, actions = load_data(DATA_PATH)
-    train_loader, val_loader = make_loaders(
-        images, states, actions, VAL_SPLIT, BATCH_SIZE
-    )
-    print(f"Train: {len(train_loader.dataset)} | Val: {len(val_loader.dataset)}")
+    train_loader, val_loader = make_loaders(VAL_SPLIT, BATCH_SIZE)  # FIX: removed load_data
 
     model = VlaDiffusion(
         state_dim=STATE_DIM,
         action_dim=ACTION_DIM,
         d_model=D_MODEL,
+        action_horizon=ACTION_HORIZON,
     ).to(DEVICE)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -117,8 +101,8 @@ def main():
 
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+    text_ids, text_mask = tokenize_instruction(INSTRUCTION)
 
-    text_ids, text_mask = tokenize_instruction(INSTRUCTION)  
     best_val_loss = float("inf")
 
     for epoch in range(EPOCHS):
@@ -126,26 +110,18 @@ def main():
         val_loss   = run_epoch(model, val_loader,   text_ids, text_mask)
         scheduler.step()
 
-        print(
-            f"Epoch {epoch+1:03d}/{EPOCHS} | "
-            f"train {train_loss:.4f} | "
-            f"val {val_loss:.4f} | "
-            f"lr {scheduler.get_last_lr()[0]:.2e}"
-        )
+        print(f"Epoch {epoch+1:03d}/{EPOCHS} | train {train_loss:.4f} | val {val_loss:.4f} | lr {scheduler.get_last_lr()[0]:.2e}")
 
-        # save best checkpoint
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            ckpt = {
+            torch.save({
                 "epoch": epoch,
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "val_loss": val_loss,
-            }
-            torch.save(ckpt, os.path.join(SAVE_DIR, "best.pt"))
+            }, os.path.join(SAVE_DIR, "best.pt"))
             print(f"  ✓ saved best checkpoint (val {val_loss:.4f})")
 
-    # always save final
     torch.save(model.state_dict(), os.path.join(SAVE_DIR, "final.pt"))
     print("Done.")
 
