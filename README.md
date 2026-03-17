@@ -130,8 +130,8 @@ vla_from_scratch/
 ## Installation
 
 ```bash
-git clone https://github.com/your-username/vla_from_scratch
-cd vla_from_scratch
+git clone https://github.com/DebatableMiracle/EasyVLA.git
+cd EasyVLA
 
 conda create -n easyvla python=3.10
 conda activate easyvla
