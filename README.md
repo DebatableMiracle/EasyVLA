@@ -1,4 +1,4 @@
-# VLA from Scratch
+# EasyVLA
 
 A Vision-Language-Action model built from scratch for robot manipulation, trained on MetaWorld environments. This repo is a fully modular, research-friendly implementation — every component (vision encoder, language encoder, fusion, action head) is swappable. Built alongside [this article](#) as a practical guide to understanding modern VLA architectures.
 
@@ -30,11 +30,11 @@ Successful episodes are **faster than the expert policy** — the model learned 
 ## Architecture
 
 ```
-Image (224×224×6)  ──► Vision Encoder (ResNet-18)  ──► vision tokens (B, 49, 256)
+Image (84×84×6)    ──► Vision Encoder (ResNet-18)  ──► vision tokens (B, N, 128)
                                                                │
-Instruction text   ──► Text Encoder (DistilBERT)   ──► text tokens   (B, L, 256)
+Instruction text   ──► Text Encoder (precomputed)  ──► text tokens   (1, L, 128)
                                                                │
-State (39-dim)     ──► State Encoder (MLP)         ──► state token  (B, 1, 256)
+State (39-dim)     ──► State Encoder (MLP)         ──► state token  (B, 1, 128)
                                                                │
                                                     ┌──────────▼──────────┐
                                                     │  Fusion Transformer  │
@@ -62,28 +62,38 @@ State (39-dim)     ──► State Encoder (MLP)         ──► state token  
 
 **DDPM diffusion head** — standard DDPM with T=64 denoising steps over a flattened action chunk. SiLU activations, sinusoidal time embeddings, hidden_dim=512.
 
+**Precomputed text tokens** — the text encoder runs once on CPU at startup and is deleted from memory. Since the instruction never changes within a task, there's no reason to keep 66M DistilBERT params on GPU. Tokens are saved inside the checkpoint so rollout doesn't need the encoder at all.
+
 ---
 
 ## Modular Design
 
-Every component is designed to be swappable. The current implementation uses one stack — more are coming:
+Every component is swappable via a string in `train.py`. No code changes needed — just change the config:
+
+```python
+VISION_ENCODER = "efficientnet"   # swap vision encoder
+TEXT_ENCODER   = "bert_tiny"      # swap text encoder
+```
 
 ### Vision Encoders
-| Encoder | Status | Style |
-|---|---|---|
-| ResNet-18 | ✅ current | ACT / Diffusion Policy |
-| EfficientNet-B0 | 🔜 soon | faster alternative |
-| DINOv2 | 🔜 soon | OpenVLA-style, spatial features |
-| SigLIP | 🔜 soon | π0 / SmolVLA-style |
-| CLIP ViT | 🔜 soon | strong vision-language baseline |
+| Encoder | Status | Params | Style |
+|---|---|---|---|
+| ResNet-18 | ✅ available | 11M | ACT / Diffusion Policy |
+| EfficientNet-B0 | ✅ available | 5.3M | faster alternative |
+| MobileNetV3-Small | ✅ available | 2.5M | lightweight, edge-friendly |
+| DINOv2-Small | ✅ available | 22M | OpenVLA-style, spatial features |
+| CLIP ViT-B/32 | 🔜 soon | 87M | vision-language aligned |
+| SigLIP | 🔜 soon | 400M | π0 / SmolVLA-style |
+| R3M | 🔜 soon | 26M | manipulation-specific pretraining |
 
 ### Language Encoders
-| Encoder | Status | Style |
-|---|---|---|
-| DistilBERT | ✅ current | lightweight transformer |
-| T5-base | 🔜 soon | Octo-style |
-| CLIP text | 🔜 soon | pairs with CLIP vision |
-| SmolLM2 | 🔜 soon | SmolVLA-style, 135M |
+| Encoder | Status | Params | Style |
+|---|---|---|---|
+| DistilBERT | ✅ available | 66M frozen | lightweight transformer |
+| SmolLM2-135M | ✅ available | 135M frozen | SmolVLA-style |
+| BERT-Tiny | ✅ available | 4.4M frozen | fastest option |
+| CLIP text | 🔜 soon | 63M | pairs with CLIP vision |
+| T5-base | 🔜 soon | 220M | Octo-style |
 
 ### Fusion
 | Type | Status | Style |
@@ -105,24 +115,36 @@ Every component is designed to be swappable. The current implementation uses one
 ## Project Structure
 
 ```
-vla_from_scratch/
+EasyVLA/
 ├── action_head/
-│   └── diffusion_head.py       # DDPM diffusion over action chunks
+│   └── diffusion_head.py          # DDPM diffusion over action chunks
 ├── encoders/
-│   ├── vision_encoder.py       # ResNet-18 with obs stacking
-│   ├── text_encoder.py         # DistilBERT with projection
-│   └── state_encoder.py        # MLP state tokenizer
+│   ├── registry.py                # encoder registry — add new encoders here
+│   ├── vision/
+│   │   ├── base.py                # BaseVisionEncoder ABC
+│   │   ├── resnet.py              # ResNet-18
+│   │   ├── efficientnet.py        # EfficientNet-B0
+│   │   ├── mobilenet.py           # MobileNetV3-Small
+│   │   └── dinov2.py              # DINOv2-Small
+│   ├── text/
+│   │   ├── base.py                # BaseTextEncoder ABC
+│   │   ├── distilbert.py          # DistilBERT
+│   │   ├── smollm.py              # SmolLM2-135M
+│   │   └── bert_tiny.py           # BERT-Tiny
+│   └── state/
+│       ├── base.py                # BaseStateEncoder ABC
+│       └── mlp.py                 # 3-layer MLP
 ├── envs/
-│   └── metaworld_env.py        # MetaWorld wrapper with frame buffer
+│   └── metaworld_env.py           # MetaWorld wrapper with frame buffer
 ├── data/
-│   └── collect_data.py         # expert demo collection, chunked saving
+│   └── collect_data.py            # expert demo collection, chunked saving
 ├── utils/
-│   ├── tokenizer.py            # DistilBERT tokenizer wrapper
-│   └── push_to_hf.py           # push checkpoints to HuggingFace Hub
-├── fusion.py                   # cross-attention fusion transformer
-├── vla_diffusion.py            # main VlaModel class
-├── train.py                    # training loop with wandb
-└── rollout.py                  # evaluation + rendering
+│   ├── tokenizer.py               # tokenizer wrapper
+│   └── push_to_hf.py              # push checkpoints to HuggingFace Hub
+├── fusion.py                      # cross-attention fusion transformer
+├── vla_diffusion.py               # main VlaModel class
+├── train.py                       # training loop with wandb
+└── rollout.py                     # evaluation + rendering
 ```
 
 ---
@@ -160,7 +182,7 @@ Key config in `collect_data.py`:
 ```python
 TASK           = "reach-v3"
 EPISODES       = 1000
-IMG_SIZE       = 224
+IMG_SIZE       = 84
 ACTION_HORIZON = 8
 OBS_HORIZON    = 2
 CHUNK_SIZE     = 100
@@ -172,16 +194,18 @@ CHUNK_SIZE     = 100
 python train.py
 ```
 
-Logs to wandb automatically. Saves best checkpoint by val loss to `checkpoints/best.pt`.
+Logs to wandb automatically. Saves best checkpoint by val loss to `checkpoints/best.pt`. Text encoder runs once on CPU at startup then is freed — only vision, fusion, and diffusion head live on GPU during training.
 
 Key config in `train.py`:
 ```python
 EPOCHS         = 100
 BATCH_SIZE     = 64
 LR             = 1e-4
-D_MODEL        = 256
+D_MODEL        = 128
 ACTION_HORIZON = 8
 OBS_HORIZON    = 2
+VISION_ENCODER = "resnet18"    # resnet18 | efficientnet | mobilenet | dinov2
+TEXT_ENCODER   = "distilbert"  # distilbert | smollm | bert_tiny
 ```
 
 ### 3. Evaluate
@@ -190,7 +214,7 @@ OBS_HORIZON    = 2
 python rollout.py
 ```
 
-Renders live with `render_mode="human"`. Reports per-episode success/fail and overall success rate.
+Renders live with `render_mode="human"`. Loads text tokens directly from checkpoint — no text encoder needed at rollout time.
 
 ### 4. Push to HuggingFace
 
@@ -206,15 +230,49 @@ python utils/push_to_hf.py
 | Component | Choice | Params |
 |---|---|---|
 | Vision encoder | ResNet-18 (layer3+4 unfrozen) | ~12M trainable |
-| Text encoder | DistilBERT (frozen + projection) | ~0.2M trainable |
-| State encoder | 3-layer MLP | ~0.15M trainable |
-| Fusion | Cross-attention transformer, 4 layers | ~3.5M trainable |
+| Text encoder | precomputed on CPU, freed after | 0 on GPU |
+| State encoder | 3-layer MLP | ~0.05M trainable |
+| Fusion | Cross-attention transformer, 4 layers | ~1M trainable |
 | Diffusion head | DDPM, T=64, hidden=512 | ~2.5M trainable |
-| **Total trainable** | | **~18M / 80M** |
+| **Total trainable** | | **~15M / 80M** |
 
 Optimizer: AdamW, lr=1e-4, cosine decay, weight_decay=1e-4  
 Gradient clipping: max_norm=1.0  
 Dataset: 960 episodes × ~50 steps → 48k `(obs, action_chunk)` pairs
+
+---
+
+## Patch Notes
+
+### v0.3 — March 18, 2026
+- **Modular encoder registry** — all encoders swappable via string config, no code changes needed
+- **New vision encoders** — EfficientNet-B0, MobileNetV3-Small, DINOv2-Small
+- **New text encoders** — SmolLM2-135M, BERT-Tiny
+- **Base classes** — `BaseVisionEncoder`, `BaseTextEncoder`, `BaseStateEncoder` ABCs for clean extension
+- **Precomputed text tokens** — text encoder runs once on CPU at startup, freed from GPU entirely. Tokens saved inside checkpoint so rollout needs no encoder
+- **Dynamic `n_tokens`** — vision encoders auto-compute token count from input resolution, no manual updates when changing image size
+- **cuDNN + TF32 flags** — `cudnn.benchmark=True` and TF32 enabled for Ampere GPUs
+- **`d_model=128`** — halved model width for 4GB GPU compatibility and MT10 scalability
+- **`IMG_SIZE=84`** — moving to 84×84 for storage efficiency at MT10 scale
+
+### v0.2 — March 2026
+- **Action chunking** — predict `action_horizon=8` future actions, execute open-loop before replanning
+- **Observation history** — `obs_horizon=2` stacks current + previous frame, gives model velocity signal
+- **Cross-attention fusion** — replaced CLS token self-attention with state-queries-visual-context design
+- **Bigger denoiser** — `hidden_dim=512`, `time_emb_dim=64`, `T=64` diffusion steps
+- **Deeper fusion** — 4 transformer layers, 8 attention heads
+- **Wider state encoder** — 3-layer MLP, `hidden=256`
+- **Incremental data collection** — chunked saving every 100 episodes to avoid RAM crash
+- **mmap dataset** — `.npy` files with `mmap_mode="r"`, full dataset never loads into RAM
+- **WandB logging** — full training metrics, encoder config logged per run
+- **Encoder config in checkpoint** — `best.pt` stores full config so rollout always matches training
+
+### v0.1 — March 2026
+- Initial implementation — single task reach-v3
+- ResNet-18 vision encoder, DistilBERT text encoder, MLP state encoder
+- Self-attention fusion with CLS token
+- DDPM diffusion head, T=16, single action prediction
+- Basic training loop and rollout script
 
 ---
 
@@ -226,11 +284,16 @@ Dataset: 960 episodes × ~50 steps → 48k `(obs, action_chunk)` pairs
 - [x] Cross-attention fusion
 - [x] WandB logging
 - [x] HuggingFace push
-- [ ] Modular encoder/fusion/head registry
+- [x] Modular encoder registry
+- [x] EfficientNet, MobileNet, DINOv2 vision encoders
+- [x] SmolLM2, BERT-Tiny text encoders
+- [x] Precomputed text tokens — zero text encoder memory on GPU
 - [ ] MT-10 multi-task training
-- [ ] DINOv2 vision encoder
+- [ ] 84×84 dataset collection + training
 - [ ] Flow matching action head
-- [ ] 84×84 resolution for MT-10 storage efficiency
+- [ ] CLIP vision + text encoder pair
+- [ ] SigLIP vision encoder
+- [ ] R3M manipulation-specific encoder
 - [ ] Per-task success rate evaluation
 - [ ] Pre-trained model weights on HuggingFace
 
