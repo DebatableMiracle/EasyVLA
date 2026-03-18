@@ -25,6 +25,16 @@ Successful episodes are **faster than the expert policy** — the model learned 
 
 > MT-10 multi-task training coming soon.
 
+## Ongoing Experiments
+
+Currently training the model across 5 MetaWorld tasks using DINOv2 as the vision encoder, Distilbert as the text encoder, and MLP as the state encoder to improve representation quality and generalization. I've moved from 224*224 to 84*84 images to reduce training time and memory usage. At the same time, since the states control dx,dy,dz to reduce jitter, I beleived acceleration component is also important hence I moved from OBS_HORIZON=2 to OBS_HORIZON=3. 
+
+These experiments aim to evaluate:
+- Cross-task generalization
+- Sample efficiency across multiple tasks
+- Impact of stronger visual representations on policy learning
+
+Results will be added upon completion of training.
 ---
 
 ## Architecture

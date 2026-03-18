@@ -1,6 +1,5 @@
 from encoders.vision.resnet       import VisionEncoderResnet18
 from encoders.vision.efficientnet import VisionEncoderEfficientNet
-from encoders.vision.mobilenet    import VisionEncoderMobileNet
 from encoders.vision.dinov2       import VisionEncoderDINOv2
 from encoders.text.distilbert     import TextEncoderDistilbert
 from encoders.text.smollm         import TextEncoderSmolLM
