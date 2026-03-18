@@ -4,24 +4,32 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
 import wandb
 
+torch.backends.cudnn.benchmark       = True
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32       = True
+
 from vla_diffusion import VlaDiffusion
+from encoders.registry import build_text_encoder
 from utils.tokenizer import tokenize_instruction
 
 DEVICE         = "cuda" if torch.cuda.is_available() else "cpu"
 SAVE_DIR       = "checkpoints"
-EPOCHS         = 100
+EPOCHS         = 10
 BATCH_SIZE     = 64
 LR             = 1e-4
 STATE_DIM      = 39
 ACTION_DIM     = 4
 D_MODEL        = 256
 ACTION_HORIZON = 8
+OBS_HORIZON    = 2
+VISION_ENCODER = "resnet18"    # "resnet18" | "efficientnet" | "mobilenet" | "dinov2"
+TEXT_ENCODER   = "distilbert"  # "distilbert" | "smollm" | "bert_tiny"
 INSTRUCTION    = "reach the target"
 VAL_SPLIT      = 0.1
-WANDB_PROJECT  = "vla-from-scratch"        # change to your project name
-OBS_HORIZON    = 2
+WANDB_PROJECT  = "vla-from-scratch"
 
 
 class DemoDataset(Dataset):
@@ -56,9 +64,19 @@ def make_loaders(val_split, batch_size):
     return train_loader, val_loader
 
 
-from tqdm import tqdm
+def precompute_text_tokens(instruction, text_encoder_name, d_model):
+    """Run text encoder once on CPU, delete it, return token tensor."""
+    print(f"Precomputing text tokens with {text_encoder_name}...")
+    encoder = build_text_encoder(text_encoder_name, d_model)   # CPU
+    ids, mask = tokenize_instruction(instruction)
+    with torch.no_grad():
+        tokens = encoder(ids, mask)                             # (1, L, d_model)
+    del encoder                                                 # free memory immediately
+    print(f"Text tokens shape: {tuple(tokens.shape)} — encoder freed from memory")
+    return tokens.detach()                                      # (1, L, d_model) on CPU
 
-def run_epoch(model, loader, text_ids, text_mask, optimizer=None):
+
+def run_epoch(model, loader, text_tokens, optimizer=None):
     is_train = optimizer is not None
     model.train() if is_train else model.eval()
 
@@ -71,12 +89,8 @@ def run_epoch(model, loader, text_ids, text_mask, optimizer=None):
             img   = img.to(DEVICE)
             state = state.to(DEVICE)
             act   = act.to(DEVICE)
-            B     = img.size(0)
 
-            t_ids  = text_ids.repeat(B, 1).to(DEVICE)
-            t_mask = text_mask.repeat(B, 1).to(DEVICE)
-
-            loss = model.loss(img, t_ids, t_mask, state, act)
+            loss = model.loss(img, text_tokens, state, act)
 
             if is_train:
                 optimizer.zero_grad()
@@ -85,9 +99,10 @@ def run_epoch(model, loader, text_ids, text_mask, optimizer=None):
                 optimizer.step()
 
             total_loss += loss.item()
-            pbar.set_postfix(loss=f"{loss.item():.4f}")  # shows current batch loss too
+            pbar.set_postfix(loss=f"{loss.item():.4f}")
 
     return total_loss / len(loader)
+
 
 def main():
     os.makedirs(SAVE_DIR, exist_ok=True)
@@ -102,21 +117,33 @@ def main():
             "action_dim":     ACTION_DIM,
             "d_model":        D_MODEL,
             "action_horizon": ACTION_HORIZON,
+            "obs_horizon":    OBS_HORIZON,
+            "vision_encoder": VISION_ENCODER,
+            "text_encoder":   TEXT_ENCODER,
             "instruction":    INSTRUCTION,
         }
     )
 
+    # precompute text tokens — encoder never touches GPU
+    text_tokens = precompute_text_tokens(INSTRUCTION, TEXT_ENCODER, D_MODEL)
+
     print("Loading data...")
     train_loader, val_loader = make_loaders(VAL_SPLIT, BATCH_SIZE)
 
-
+    # text encoder not loaded into model — vision/state/fusion/diffusion only
     model = VlaDiffusion(
-        state_dim=STATE_DIM,
-        action_dim=ACTION_DIM,
-        d_model=D_MODEL,
-        action_horizon=ACTION_HORIZON,
-        obs_horizon=OBS_HORIZON,
-        ).to(DEVICE)
+        state_dim      = STATE_DIM,
+        action_dim     = ACTION_DIM,
+        d_model        = D_MODEL,
+        action_horizon = ACTION_HORIZON,
+        obs_horizon    = OBS_HORIZON,
+        vision_encoder = VISION_ENCODER,
+        text_encoder   = TEXT_ENCODER,   # still needed to build projection layer
+    ).to(DEVICE)
+
+    # free the text encoder weights from the model too — keep only projection
+    del model.text_encoder
+    model.text_encoder = None
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable params: {n_params:,}")
@@ -124,13 +151,12 @@ def main():
 
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
-    text_ids, text_mask = tokenize_instruction(INSTRUCTION)
 
     best_val_loss = float("inf")
 
     for epoch in range(EPOCHS):
-        train_loss = run_epoch(model, train_loader, text_ids, text_mask, optimizer)
-        val_loss   = run_epoch(model, val_loader,   text_ids, text_mask)
+        train_loss = run_epoch(model, train_loader, text_tokens, optimizer)
+        val_loss   = run_epoch(model, val_loader,   text_tokens)
         scheduler.step()
         lr = scheduler.get_last_lr()[0]
 
@@ -145,19 +171,22 @@ def main():
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            ckpt = {
-                "epoch":      epoch,
-                "model":      model.state_dict(),
-                "optimizer":  optimizer.state_dict(),
-                "val_loss":   val_loss,
+            torch.save({
+                "epoch":     epoch,
+                "model":     model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "val_loss":  val_loss,
+                "text_tokens": text_tokens,   # save tokens so rollout doesn't need encoder
                 "config": {
                     "state_dim":      STATE_DIM,
                     "action_dim":     ACTION_DIM,
                     "d_model":        D_MODEL,
                     "action_horizon": ACTION_HORIZON,
+                    "obs_horizon":    OBS_HORIZON,
+                    "vision_encoder": VISION_ENCODER,
+                    "text_encoder":   TEXT_ENCODER,
                 }
-            }
-            torch.save(ckpt, os.path.join(SAVE_DIR, "best.pt"))
+            }, os.path.join(SAVE_DIR, "best.pt"))
             wandb.log({"best_val_loss": val_loss})
             print(f"  ✓ saved best checkpoint (val {val_loss:.4f})")
 
