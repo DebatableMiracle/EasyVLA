@@ -1,20 +1,27 @@
-from encoders.vision.resnet      import VisionEncoderResnet18
+from encoders.vision.resnet       import VisionEncoderResnet18
 from encoders.vision.efficientnet import VisionEncoderEfficientNet
-from encoders.text.distilbert    import TextEncoderDistilbert
-from encoders.text.smollm        import TextEncoderSmolLM
-from encoders.state.mlp          import StateEncoderMLP
+from encoders.vision.mobilenet    import VisionEncoderMobileNet
+from encoders.vision.dinov2       import VisionEncoderDINOv2
+from encoders.text.distilbert     import TextEncoderDistilbert
+from encoders.text.smollm         import TextEncoderSmolLM
+from encoders.text.bert_tiny      import TextEncoderBERTTiny
+from encoders.state.mlp           import StateEncoderMLP
+
 
 VISION_ENCODERS = {
     "resnet18":     VisionEncoderResnet18,
     "efficientnet": VisionEncoderEfficientNet,
-    # "dinov2": VisionEncoderDINOv2,   # coming soon
-    # "clip":   VisionEncoderCLIP,     # coming soon
-    # "siglip": VisionEncoderSigLIP,   # coming soon
+    "dinov2":       VisionEncoderDINOv2,
+    # "clip":    VisionEncoderCLIP,    # coming soon
+    # "siglip":  VisionEncoderSigLIP,  # coming soon
+    # "r3m":     VisionEncoderR3M,     # coming soon
+    # "mobilenet":    VisionEncoderMobileNet, 
 }
 
 TEXT_ENCODERS = {
     "distilbert": TextEncoderDistilbert,
     "smollm":     TextEncoderSmolLM,
+    "bert_tiny":  TextEncoderBERTTiny,
     # "clip": TextEncoderCLIP,   # coming soon
     # "t5":   TextEncoderT5,     # coming soon
 }
