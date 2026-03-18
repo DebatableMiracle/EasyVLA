@@ -16,11 +16,11 @@ import os
 
 # ── choose your tasks here ────────────────────────────────────────────────────
 TASKS = [
-    "reach-v3",
-    "push-v3",
-    "drawer-open-v3",
-    "drawer-close-v3",
-    "button-press-topdown-v3",
+    "reach-v3",           # easy   — baseline, you know what good looks like
+    "drawer-close-v3",    # easy   — short motion, high success rate
+    "button-press-topdown-v3",  # easy/medium — requires precision, not just reaching
+    "door-open-v3",       # medium — requires contact + sustained force
+    "push-v3",            # medium — requires object interaction
 ]
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -42,7 +42,7 @@ MAX_STEPS         = 200
 IMG_SIZE          = 84
 ACTION_HORIZON    = 8
 OBS_HORIZON       = 3
-CHUNK_SIZE        = 64
+CHUNK_SIZE        = 100
 DATA_ROOT         = "data"
 
 
