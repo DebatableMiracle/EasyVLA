@@ -3,41 +3,54 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, ConcatDataset
 from tqdm import tqdm
 import wandb
 
-torch.backends.cudnn.benchmark       = True
+torch.backends.cudnn.benchmark        = True
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32       = True
 
 from vla_diffusion import VlaDiffusion
 from encoders.registry import build_text_encoder
 from utils.tokenizer import tokenize_instruction
+from utils.task_config import TASK_INSTRUCTIONS
 
 DEVICE         = "cuda" if torch.cuda.is_available() else "cpu"
 SAVE_DIR       = "checkpoints"
-EPOCHS         = 10
-BATCH_SIZE     = 64
+EPOCHS         = 100
+BATCH_SIZE     = 96
 LR             = 1e-4
 STATE_DIM      = 39
 ACTION_DIM     = 4
 D_MODEL        = 256
 ACTION_HORIZON = 8
-OBS_HORIZON    = 2
-VISION_ENCODER = "resnet18"    # "resnet18" | "efficientnet" | "mobilenet" | "dinov2"
-TEXT_ENCODER   = "distilbert"  # "distilbert" | "smollm" | "bert_tiny"
-INSTRUCTION    = "reach the target"
+OBS_HORIZON    = 3
+VISION_ENCODER = "dinov2"
+TEXT_ENCODER   = "distilbert"
 VAL_SPLIT      = 0.1
 WANDB_PROJECT  = "vla-from-scratch"
+DATA_ROOT      = "data"
+
+# ── choose tasks to train on ──────────────────────────────────────────────────
+TASKS = [
+    "reach-v3",
+    "push-v3",
+    "drawer-open-v3",
+    "drawer-close-v3",
+    "button-press-topdown-v3",
+]
+# ─────────────────────────────────────────────────────────────────────────────
 
 
-class DemoDataset(Dataset):
-    def __init__(self, indices):
-        self.images  = np.load("data/images.npy",  mmap_mode="r")
-        self.states  = np.load("data/states.npy",  mmap_mode="r")
-        self.actions = np.load("data/actions.npy", mmap_mode="r")
-        self.indices = indices
+class TaskDataset(Dataset):
+    def __init__(self, task_name, task_id, indices):
+        task_dir         = os.path.join(DATA_ROOT, task_name)
+        self.images      = np.load(os.path.join(task_dir, "images.npy"),  mmap_mode="r")
+        self.states      = np.load(os.path.join(task_dir, "states.npy"),  mmap_mode="r")
+        self.actions     = np.load(os.path.join(task_dir, "actions.npy"), mmap_mode="r")
+        self.task_id     = task_id
+        self.indices     = indices
 
     def __len__(self):
         return len(self.indices)
@@ -47,36 +60,58 @@ class DemoDataset(Dataset):
         image  = torch.tensor(self.images[i].copy()).permute(2, 0, 1).float() / 255.0
         state  = torch.tensor(self.states[i].copy()).float()
         action = torch.tensor(self.actions[i].copy()).float()
-        return image, state, action
+        return image, state, action, self.task_id
 
 
-def make_loaders(val_split, batch_size):
-    N       = np.load("data/images.npy", mmap_mode="r").shape[0]
-    n_val   = int(N * val_split)
-    n_train = N - n_val
-    indices = np.arange(N)
-    print(f"Train: {n_train} | Val: {n_val}")
+def make_loaders(tasks, val_split, batch_size):
+    train_datasets = []
+    val_datasets   = []
 
-    train_loader = DataLoader(DemoDataset(indices[:n_train]), batch_size=batch_size,
-                              shuffle=True,  num_workers=4, pin_memory=True)
-    val_loader   = DataLoader(DemoDataset(indices[n_train:]), batch_size=batch_size,
-                              shuffle=False, num_workers=4, pin_memory=True)
+    for task_id, task_name in enumerate(tasks):
+        N       = np.load(os.path.join(DATA_ROOT, task_name, "images.npy"),
+                          mmap_mode="r").shape[0]
+        n_val   = int(N * val_split)
+        n_train = N - n_val
+        indices = np.arange(N)
+
+        train_datasets.append(TaskDataset(task_name, task_id, indices[:n_train]))
+        val_datasets.append(TaskDataset(task_name, task_id, indices[n_train:]))
+
+        print(f"  {task_name:<35} train: {n_train:>6} | val: {n_val:>5}")
+
+    # ConcatDataset merges all tasks — joint training
+    train_loader = DataLoader(
+        ConcatDataset(train_datasets),
+        batch_size=batch_size, shuffle=True,
+        num_workers=4, pin_memory=True
+    )
+    val_loader = DataLoader(
+        ConcatDataset(val_datasets),
+        batch_size=batch_size, shuffle=False,
+        num_workers=4, pin_memory=True
+    )
     return train_loader, val_loader
 
 
-def precompute_text_tokens(instruction, text_encoder_name, d_model):
-    """Run text encoder once on CPU, delete it, return token tensor."""
-    print(f"Precomputing text tokens with {text_encoder_name}...")
-    encoder = build_text_encoder(text_encoder_name, d_model)   # CPU
-    ids, mask = tokenize_instruction(instruction)
-    with torch.no_grad():
-        tokens = encoder(ids, mask)                             # (1, L, d_model)
-    del encoder                                                 # free memory immediately
-    print(f"Text tokens shape: {tuple(tokens.shape)} — encoder freed from memory")
-    return tokens.detach()                                      # (1, L, d_model) on CPU
+def precompute_text_tokens(tasks, text_encoder_name, d_model):
+    print(f"Precomputing text tokens for {len(tasks)} tasks...")
+    encoder = build_text_encoder(text_encoder_name, d_model)
+    token_dict = {}
+
+    for task_id, task_name in enumerate(tasks):
+        instruction = TASK_INSTRUCTIONS[task_name]
+        ids, mask   = tokenize_instruction(instruction)
+        with torch.no_grad():
+            tokens = encoder(ids, mask)          # (1, L, d_model)
+        token_dict[task_id] = tokens.detach()
+        print(f"  [{task_id}] {task_name}: '{instruction}'")
+
+    del encoder
+    print("Text encoder freed from memory.")
+    return token_dict  # {task_id: (1, L, d_model)}
 
 
-def run_epoch(model, loader, text_tokens, optimizer=None):
+def run_epoch(model, loader, token_dict, optimizer=None):
     is_train = optimizer is not None
     model.train() if is_train else model.eval()
 
@@ -85,10 +120,17 @@ def run_epoch(model, loader, text_tokens, optimizer=None):
 
     with ctx:
         pbar = tqdm(loader, desc="train" if is_train else "val  ", leave=False)
-        for img, state, act in pbar:
+        for img, state, act, task_ids in pbar:
             img   = img.to(DEVICE)
             state = state.to(DEVICE)
             act   = act.to(DEVICE)
+            B     = img.size(0)
+
+            # build per-sample text tokens from task_ids
+            text_tokens = torch.cat([
+                token_dict[t.item()].expand(1, -1, -1)
+                for t in task_ids
+            ], dim=0).to(DEVICE)   # (B, L, d_model)
 
             loss = model.loss(img, text_tokens, state, act)
 
@@ -120,17 +162,16 @@ def main():
             "obs_horizon":    OBS_HORIZON,
             "vision_encoder": VISION_ENCODER,
             "text_encoder":   TEXT_ENCODER,
-            "instruction":    INSTRUCTION,
+            "tasks":          TASKS,
         }
     )
 
-    # precompute text tokens — encoder never touches GPU
-    text_tokens = precompute_text_tokens(INSTRUCTION, TEXT_ENCODER, D_MODEL)
+    token_dict = precompute_text_tokens(TASKS, TEXT_ENCODER, D_MODEL)
 
-    print("Loading data...")
-    train_loader, val_loader = make_loaders(VAL_SPLIT, BATCH_SIZE)
+    print("\nLoading data...")
+    train_loader, val_loader = make_loaders(TASKS, VAL_SPLIT, BATCH_SIZE)
+    print(f"Train batches: {len(train_loader)} | Val batches: {len(val_loader)}")
 
-    # text encoder not loaded into model — vision/state/fusion/diffusion only
     model = VlaDiffusion(
         state_dim      = STATE_DIM,
         action_dim     = ACTION_DIM,
@@ -138,10 +179,9 @@ def main():
         action_horizon = ACTION_HORIZON,
         obs_horizon    = OBS_HORIZON,
         vision_encoder = VISION_ENCODER,
-        text_encoder   = TEXT_ENCODER,   # still needed to build projection layer
+        text_encoder   = TEXT_ENCODER,
     ).to(DEVICE)
 
-    # free the text encoder weights from the model too — keep only projection
     del model.text_encoder
     model.text_encoder = None
 
@@ -155,8 +195,8 @@ def main():
     best_val_loss = float("inf")
 
     for epoch in range(EPOCHS):
-        train_loss = run_epoch(model, train_loader, text_tokens, optimizer)
-        val_loss   = run_epoch(model, val_loader,   text_tokens)
+        train_loss = run_epoch(model, train_loader, token_dict, optimizer)
+        val_loss   = run_epoch(model, val_loader,   token_dict)
         scheduler.step()
         lr = scheduler.get_last_lr()[0]
 
@@ -172,11 +212,12 @@ def main():
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save({
-                "epoch":     epoch,
-                "model":     model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "val_loss":  val_loss,
-                "text_tokens": text_tokens,   # save tokens so rollout doesn't need encoder
+                "epoch":       epoch,
+                "model":       model.state_dict(),
+                "optimizer":   optimizer.state_dict(),
+                "val_loss":    val_loss,
+                "token_dict":  token_dict,
+                "tasks":       TASKS,
                 "config": {
                     "state_dim":      STATE_DIM,
                     "action_dim":     ACTION_DIM,
