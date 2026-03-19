@@ -41,6 +41,19 @@ TASKS = [
     "push-v3",            # medium — requires object interaction
 ]
 # ─────────────────────────────────────────────────────────────────────────────
+# add at top of main()
+RESUME_FROM = "checkpoints/best.pt"  # set to None to start fresh
+
+if RESUME_FROM and os.path.exists(RESUME_FROM):
+    ckpt = torch.load(RESUME_FROM, map_location=DEVICE)
+    model.load_state_dict(ckpt["model"])
+    optimizer.load_state_dict(ckpt["optimizer"])
+    start_epoch = ckpt["epoch"] + 1
+    best_val_loss = ckpt["val_loss"]
+    print(f"Resumed from epoch {start_epoch} | best val: {best_val_loss:.4f}")
+else:
+    start_epoch = 0
+    best_val_loss = float("inf")
 
 
 class TaskDataset(Dataset):
@@ -194,7 +207,11 @@ def main():
 
     best_val_loss = float("inf")
 
-    for epoch in range(EPOCHS):
+    # change the for loop from
+#    for epoch in range(EPOCHS):
+    # to
+    for epoch in range(start_epoch, EPOCHS):
+
         train_loss = run_epoch(model, train_loader, token_dict, optimizer)
         val_loss   = run_epoch(model, val_loader,   token_dict)
         scheduler.step()

@@ -224,6 +224,10 @@ checkpoints/*
 #wandb
 wandb/*
 
+#videos
+videos/*
+
+#
+testcode.py
 
 
-/testcode.pytestcode.py

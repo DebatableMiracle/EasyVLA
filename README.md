@@ -12,7 +12,20 @@ A Vision-Language-Action model built from scratch for robot manipulation, traine
 
 ## Results
 
-Trained on `reach-v3` with 960 expert demonstrations:
+### Run 1 — Single Task, Baseline (reach-v3)
+ResNet-18 · DistilBERT · 224×224 · obs_horizon=2 · single action prediction
+
+| Metric | Value |
+|---|---|
+| Val loss (epoch 100) | **0.86** |
+| Success rate (10 rollouts) | **20%** |
+| Avg steps on success | ~150 steps |
+| Expert avg steps | ~50 steps |
+
+---
+
+### Run 2 — Single Task, Improved Architecture (reach-v3)
+ResNet-18 · DistilBERT · 224×224 · obs_horizon=2 · action chunking · cross-attention fusion
 
 | Metric | Value |
 |---|---|
@@ -21,30 +34,46 @@ Trained on `reach-v3` with 960 expert demonstrations:
 | Avg steps on success | **~30 steps** |
 | Expert avg steps | ~50 steps |
 
-Successful episodes are **faster than the expert policy** — the model learned efficient reach trajectories rather than random walks.
+Successful episodes were **faster than the expert policy**. The main remaining issue was the camera angle — default MetaWorld `behindGripper` view caused depth ambiguity for certain target positions.
 
-> MT-10 multi-task training coming soon.
+---
 
-## Ongoing Experiments
+### Run 3 — Multi-Task MT5, DINOv2 (ongoing → recollecting)
+DINOv2-Small · DistilBERT · 84×84 · obs_horizon=3 · action chunking · cross-attention fusion · 5 tasks jointly
 
-Currently training the model across 5 MetaWorld tasks using DINOv2 as the vision encoder, Distilbert as the text encoder, and MLP as the state encoder to improve representation quality and generalization. I've moved from 224*224 to 84*84 images to reduce training time and memory usage. At the same time, since the states control dx,dy,dz to reduce jitter, I beleived acceleration component is also important hence I moved from OBS_HORIZON=2 to OBS_HORIZON=3. 
+| Task | Success Rate | Notes |
+|---|---|---|
+| reach-v3 | **90%** | strong |
+| button-press-topdown-v3 | **100%** | strong |
+| door-open-v3 | **60%** | contact task, decent |
+| drawer-close-v3 | **40%** | contact task |
+| push-v3 | **0%** | object interaction — camera issue |
+| **Overall** | **58%** | epoch 45/100, stopped early |
 
-These experiments aim to evaluate:
-- Cross-task generalization
-- Sample efficiency across multiple tasks
-- Impact of stronger visual representations on policy learning
+> **Known issue:** entire dataset was collected using the default MetaWorld `behindGripper` camera — an ego-centric view from behind the gripper that provides poor depth perception and makes object positions ambiguous. Push-v3 fails completely because the puck and target are on the table surface which is nearly invisible from this angle. **Currently recollecting all data with `corner2` camera at 128×128 resolution.** I'm currently trying to fix this however, I have to do this with minimal dataset size and also, update to 224 or 128 res which will increase the dataset size even more.
 
-Results will be added upon completion of training.
+---
+
+## Ongoing — Run 4 (in progress)
+DINOv2-Small · DistilBERT · **128×128** · obs_horizon=3 · **corner2 camera** · 5 tasks jointly
+
+Fixing the camera angle and resolution identified as the primary bottleneck from Run 3. Expected improvement:
+- Push-v3: 0% → 60%+ (table surface now visible)
+- Drawer/door: 40-60% → 70%+ (better depth perception for contact)
+- Overall: 58% → 75%+
+
+Results will be added upon completion.
+
 ---
 
 ## Architecture
 
 ```
-Image (84×84×6)    ──► Vision Encoder (ResNet-18)  ──► vision tokens (B, N, 128)
+Image (128×128×9)  ──► Vision Encoder (DINOv2-Small) ──► vision tokens (B, N, 256)
                                                                │
-Instruction text   ──► Text Encoder (precomputed)  ──► text tokens   (1, L, 128)
+Instruction text   ──► Text Encoder (precomputed)    ──► text tokens   (1, L, 256)
                                                                │
-State (39-dim)     ──► State Encoder (MLP)         ──► state token  (B, 1, 128)
+State (39-dim)     ──► State Encoder (MLP)           ──► state token  (B, 1, 256)
                                                                │
                                                     ┌──────────▼──────────┐
                                                     │  Fusion Transformer  │
@@ -64,15 +93,17 @@ State (39-dim)     ──► State Encoder (MLP)         ──► state token  
 
 ### Key design choices
 
-**Observation history (`obs_horizon=2`)** — stacks the current and previous frame along the channel dimension (6 channels total), giving the model implicit velocity information. The model can infer whether the arm is moving toward or away from the target.
+**Observation history (`obs_horizon=3`)** — stacks the last 3 frames along the channel dimension (9 channels total). Gives the model position, velocity, and acceleration signals implicitly. The model can infer whether the arm is moving toward or away from the target and whether it is decelerating for a precise approach.
 
 **Action chunking (`action_horizon=8`)** — predicts 8 future actions at once and executes them open-loop before replanning. Borrowed from the Diffusion Policy paper. Prevents error compounding from single-step reactive control.
 
 **Cross-attention fusion** — state tokens query the visual+text context as keys/values rather than everything being mixed through a CLS token. Allows the model to ask spatially-specific questions of the visual context.
 
-**DDPM diffusion head** — standard DDPM with T=64 denoising steps over a flattened action chunk. SiLU activations, sinusoidal time embeddings, hidden_dim=512.
+**DDPM diffusion head** — standard DDPM with T=64 denoising steps over a flattened action chunk. SiLU activations, sinusoidal time embeddings with learned projection, hidden_dim=512, condition projection MLP.
 
-**Precomputed text tokens** — the text encoder runs once on CPU at startup and is deleted from memory. Since the instruction never changes within a task, there's no reason to keep 66M DistilBERT params on GPU. Tokens are saved inside the checkpoint so rollout doesn't need the encoder at all.
+**Precomputed text tokens** — the text encoder runs once on CPU at startup and is deleted from memory. Since the instruction never changes within a task, there's no reason to keep 66M DistilBERT params on GPU. For MT training, one token tensor is precomputed per task. Tokens are saved inside the checkpoint so rollout needs no encoder at all.
+
+**Task-specific cameras** — different MetaWorld tasks benefit from different camera angles. The `corner2` camera provides a full workspace view with better depth cues for contact tasks. Camera is configurable per task via `TASK_CAMERAS` in `metaworld_env.py`.
 
 ---
 
@@ -145,16 +176,17 @@ EasyVLA/
 │       ├── base.py                # BaseStateEncoder ABC
 │       └── mlp.py                 # 3-layer MLP
 ├── envs/
-│   └── metaworld_env.py           # MetaWorld wrapper with frame buffer
+│   └── metaworld_env.py           # MetaWorld wrapper with frame buffer + camera control
 ├── data/
-│   └── collect_data.py            # expert demo collection, chunked saving
+│   └── collect_data.py            # expert demo collection, chunked saving, multi-task
 ├── utils/
+│   ├── task_config.py             # task instructions + difficulty tiers
 │   ├── tokenizer.py               # tokenizer wrapper
 │   └── push_to_hf.py              # push checkpoints to HuggingFace Hub
 ├── fusion.py                      # cross-attention fusion transformer
 ├── vla_diffusion.py               # main VlaModel class
-├── train.py                       # training loop with wandb
-└── rollout.py                     # evaluation + rendering
+├── train.py                       # training loop with wandb, multi-task
+└── rollout.py                     # evaluation + rendering + video saving
 ```
 
 ---
@@ -186,15 +218,15 @@ pip install opencv-python
 python -m data.collect_data
 ```
 
-Saves chunked `.npy` files to `data/` — collects 100 episodes at a time to avoid RAM overflow, appends to disk incrementally.
+Saves chunked `.npy` files to `data/<task>/` — collects 100 episodes at a time to avoid RAM overflow, appends to disk incrementally. Edit `TASKS` at the top of `collect_data.py` to choose which tasks to collect.
 
 Key config in `collect_data.py`:
 ```python
-TASK           = "reach-v3"
+TASKS          = ["reach-v3", "push-v3", ...]  # choose your tasks
 EPISODES       = 1000
-IMG_SIZE       = 84
+IMG_SIZE       = 128
 ACTION_HORIZON = 8
-OBS_HORIZON    = 2
+OBS_HORIZON    = 3
 CHUNK_SIZE     = 100
 ```
 
@@ -204,27 +236,36 @@ CHUNK_SIZE     = 100
 python train.py
 ```
 
-Logs to wandb automatically. Saves best checkpoint by val loss to `checkpoints/best.pt`. Text encoder runs once on CPU at startup then is freed — only vision, fusion, and diffusion head live on GPU during training.
+Logs to wandb automatically. Saves best checkpoint by val loss to `checkpoints/best.pt`. Text encoders are precomputed once per task on CPU then freed — only vision, fusion, and diffusion head live on GPU during training.
 
 Key config in `train.py`:
 ```python
+TASKS          = ["reach-v3", "push-v3", ...]
 EPOCHS         = 100
-BATCH_SIZE     = 64
+BATCH_SIZE     = 96
 LR             = 1e-4
-D_MODEL        = 128
+D_MODEL        = 256
 ACTION_HORIZON = 8
-OBS_HORIZON    = 2
-VISION_ENCODER = "resnet18"    # resnet18 | efficientnet | mobilenet | dinov2
+OBS_HORIZON    = 3
+VISION_ENCODER = "dinov2"      # resnet18 | efficientnet | mobilenet | dinov2
 TEXT_ENCODER   = "distilbert"  # distilbert | smollm | bert_tiny
 ```
 
 ### 3. Evaluate
 
 ```bash
+# live render
 python rollout.py
-```
 
-Renders live with `render_mode="human"`. Loads text tokens directly from checkpoint — no text encoder needed at rollout time.
+# save videos to videos/ folder
+python rollout.py --mode save_video
+
+# headless, just numbers
+python rollout.py --mode headless
+
+# specific tasks, more episodes
+python rollout.py --tasks reach-v3 push-v3 --episodes 20 --mode headless
+```
 
 ### 4. Push to HuggingFace
 
@@ -239,31 +280,40 @@ python utils/push_to_hf.py
 
 | Component | Choice | Params |
 |---|---|---|
-| Vision encoder | ResNet-18 (layer3+4 unfrozen) | ~12M trainable |
+| Vision encoder | DINOv2-Small (last block unfrozen) | ~3M trainable |
 | Text encoder | precomputed on CPU, freed after | 0 on GPU |
-| State encoder | 3-layer MLP | ~0.05M trainable |
-| Fusion | Cross-attention transformer, 4 layers | ~1M trainable |
-| Diffusion head | DDPM, T=64, hidden=512 | ~2.5M trainable |
-| **Total trainable** | | **~15M / 80M** |
+| State encoder | 3-layer MLP, hidden=256 | ~0.15M trainable |
+| Fusion | Cross-attention transformer, 4 layers, 8 heads | ~3.5M trainable |
+| Diffusion head | DDPM, T=64, hidden=512, cond_proj MLP | ~3.5M trainable |
+| **Total trainable** | | **~10M / 100M** |
 
 Optimizer: AdamW, lr=1e-4, cosine decay, weight_decay=1e-4  
 Gradient clipping: max_norm=1.0  
-Dataset: 960 episodes × ~50 steps → 48k `(obs, action_chunk)` pairs
+Dataset: 1000 episodes × 5 tasks × ~80 avg steps → ~400k `(obs, action_chunk)` pairs
 
 ---
 
 ## Patch Notes
+
+### v0.4 — March 19, 2026
+- **Camera fix** — identified default `behindGripper` camera as primary failure cause for contact tasks. Moving to `corner2` which shows full workspace with better depth cues
+- **Resolution bump** — 84×84 → 128×128 for better object visibility
+- **CLI rollout** — `--mode render|save_video|headless`, `--tasks`, `--episodes`, `--max_steps` args
+- **Video recording** — `python rollout.py --mode save_video` saves per-episode mp4s to `videos/<task>/`
+- **Multi-task rollout** — evaluates list of tasks in one run, prints per-task and overall summary table
+- **`task_config.py`** — single source of truth for task instructions and difficulty tiers
+- **`check_episode_lengths.py`** — utility to measure expert policy step distributions per task
 
 ### v0.3 — March 18, 2026
 - **Modular encoder registry** — all encoders swappable via string config, no code changes needed
 - **New vision encoders** — EfficientNet-B0, MobileNetV3-Small, DINOv2-Small
 - **New text encoders** — SmolLM2-135M, BERT-Tiny
 - **Base classes** — `BaseVisionEncoder`, `BaseTextEncoder`, `BaseStateEncoder` ABCs for clean extension
-- **Precomputed text tokens** — text encoder runs once on CPU at startup, freed from GPU entirely. Tokens saved inside checkpoint so rollout needs no encoder
-- **Dynamic `n_tokens`** — vision encoders auto-compute token count from input resolution, no manual updates when changing image size
+- **Precomputed text tokens** — text encoder runs once on CPU at startup, freed from GPU entirely
+- **Multi-task training** — `ConcatDataset` over per-task folders, per-batch text token lookup by task_id
+- **Dynamic `n_tokens`** — vision encoders auto-compute token count from input resolution
 - **cuDNN + TF32 flags** — `cudnn.benchmark=True` and TF32 enabled for Ampere GPUs
-- **`d_model=128`** — halved model width for 4GB GPU compatibility and MT10 scalability
-- **`IMG_SIZE=84`** — moving to 84×84 for storage efficiency at MT10 scale
+- **obs_horizon=3** — adds acceleration signal on top of velocity
 
 ### v0.2 — March 2026
 - **Action chunking** — predict `action_horizon=8` future actions, execute open-loop before replanning
@@ -290,7 +340,7 @@ Dataset: 960 episodes × ~50 steps → 48k `(obs, action_chunk)` pairs
 
 - [x] Single task (reach-v3)
 - [x] Action chunking
-- [x] Observation history
+- [x] Observation history (obs_horizon=3)
 - [x] Cross-attention fusion
 - [x] WandB logging
 - [x] HuggingFace push
@@ -298,13 +348,16 @@ Dataset: 960 episodes × ~50 steps → 48k `(obs, action_chunk)` pairs
 - [x] EfficientNet, MobileNet, DINOv2 vision encoders
 - [x] SmolLM2, BERT-Tiny text encoders
 - [x] Precomputed text tokens — zero text encoder memory on GPU
-- [ ] MT-10 multi-task training
-- [ ] 84×84 dataset collection + training
+- [x] Multi-task data collection + joint training (MT5)
+- [x] Video recording rollout
+- [x] CLI rollout arguments
+- [ ] Fix camera angle — recollect at 128×128 with corner2 (in progress)
+- [ ] MT5 results with correct camera
+- [ ] MT-10 full suite
 - [ ] Flow matching action head
 - [ ] CLIP vision + text encoder pair
 - [ ] SigLIP vision encoder
 - [ ] R3M manipulation-specific encoder
-- [ ] Per-task success rate evaluation
 - [ ] Pre-trained model weights on HuggingFace
 
 ---

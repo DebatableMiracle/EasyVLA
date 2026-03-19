@@ -1,7 +1,7 @@
 from huggingface_hub import HfApi, upload_file
 import os
 
-HF_REPO   = "your-username/vla-reach-v3"   # change this
+HF_REPO   = "honestlyanubhav/vla-from-scratch-day3"   # change this
 HF_TOKEN  = os.environ.get("HF_TOKEN")      # set in env or paste directly
 CKPT_PATH = "checkpoints/best.pt"
 
