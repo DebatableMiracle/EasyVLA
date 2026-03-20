@@ -63,7 +63,15 @@ Fixing the camera angle and resolution identified as the primary bottleneck from
 - Overall: 58% → 75%+
 
 Results will be added upon completion.
+20 March 2026
+The results haven't been better yet. Which urges me to look at the architecture more deeply. While, the architecture is essentially too weak to generalise, I still think it should be possible to arrive at some sense of generalization with ~15M trainable parameters. While you can always pinpoint that my datasets are too small and less diverse at 500-1000 episodes per task (5tasks). I think that we can still get some improvement over our current scenarios. Essentially even a simple MLP is good to solve some tasks like Reach etc. However cross attention urges the model to also use the vision tokens. I've been thinking of improving the fusion steps, add more size to outputs of the encoders. The size representation is an interesting idea for such small sized fusion. maybe too less steps to generalize over 5 different tasks honestly I train for ~50 epochs only usually however considering the loss DOES go below 5% each run, it tells me a story that model are preferring to learn trajectories rather than generalize through tasks.
 
+My current ideas:
+- Dropoutsss, drop vision tokens, state info, or even text description.
+- Add moore task descriptions and cycle through them throughout training giving more genralized task solutions, however ths is about language semantics, while current issue is more around it understanding vision tokens. 
+- Maybe train without state dimensions, and only use vision and text tokens. I wanna see how long it takes for that. Because there's a high chance that the model is just using the state information to solve the tasks as Camera angle changes didn't reflect much into the loss curves (WHICH SHOULD BE MY BIGGEST SIGNAL THROUGH THIS WORK). 
+
+Anyways I'll keep updating lol
 ---
 
 ## Architecture

@@ -26,44 +26,31 @@ ACTION_DIM     = 4
 D_MODEL        = 256
 ACTION_HORIZON = 8
 OBS_HORIZON    = 3
-VISION_ENCODER = "dinov2"
+VISION_ENCODER = "resnet18"
 TEXT_ENCODER   = "distilbert"
 VAL_SPLIT      = 0.1
 WANDB_PROJECT  = "vla-from-scratch"
 DATA_ROOT      = "data"
+RESUME_FROM    = None
+PATIENCE       = 8    # stop if val loss doesn't improve for 5 epochs
 
-# ── choose tasks to train on ──────────────────────────────────────────────────
 TASKS = [
-    "reach-v3",           # easy   — baseline, you know what good looks like
-    "drawer-close-v3",    # easy   — short motion, high success rate
-    "button-press-topdown-v3",  # easy/medium — requires precision, not just reaching
-    "door-open-v3",       # medium — requires contact + sustained force
-    "push-v3",            # medium — requires object interaction
+    "reach-v3",
+    "drawer-close-v3",
+    "button-press-topdown-v3",
+    "door-open-v3",
+    #"push-v3",
 ]
-# ─────────────────────────────────────────────────────────────────────────────
-# add at top of main()
-RESUME_FROM = "checkpoints/best.pt"  # set to None to start fresh
-
-if RESUME_FROM and os.path.exists(RESUME_FROM):
-    ckpt = torch.load(RESUME_FROM, map_location=DEVICE)
-    model.load_state_dict(ckpt["model"])
-    optimizer.load_state_dict(ckpt["optimizer"])
-    start_epoch = ckpt["epoch"] + 1
-    best_val_loss = ckpt["val_loss"]
-    print(f"Resumed from epoch {start_epoch} | best val: {best_val_loss:.4f}")
-else:
-    start_epoch = 0
-    best_val_loss = float("inf")
 
 
 class TaskDataset(Dataset):
     def __init__(self, task_name, task_id, indices):
-        task_dir         = os.path.join(DATA_ROOT, task_name)
-        self.images      = np.load(os.path.join(task_dir, "images.npy"),  mmap_mode="r")
-        self.states      = np.load(os.path.join(task_dir, "states.npy"),  mmap_mode="r")
-        self.actions     = np.load(os.path.join(task_dir, "actions.npy"), mmap_mode="r")
-        self.task_id     = task_id
-        self.indices     = indices
+        task_dir     = os.path.join(DATA_ROOT, task_name)
+        self.images  = np.load(os.path.join(task_dir, "images.npy"),  mmap_mode="r")
+        self.states  = np.load(os.path.join(task_dir, "states.npy"),  mmap_mode="r")
+        self.actions = np.load(os.path.join(task_dir, "actions.npy"), mmap_mode="r")
+        self.task_id = task_id
+        self.indices = indices
 
     def __len__(self):
         return len(self.indices)
@@ -89,10 +76,8 @@ def make_loaders(tasks, val_split, batch_size):
 
         train_datasets.append(TaskDataset(task_name, task_id, indices[:n_train]))
         val_datasets.append(TaskDataset(task_name, task_id, indices[n_train:]))
-
         print(f"  {task_name:<35} train: {n_train:>6} | val: {n_val:>5}")
 
-    # ConcatDataset merges all tasks — joint training
     train_loader = DataLoader(
         ConcatDataset(train_datasets),
         batch_size=batch_size, shuffle=True,
@@ -108,20 +93,20 @@ def make_loaders(tasks, val_split, batch_size):
 
 def precompute_text_tokens(tasks, text_encoder_name, d_model):
     print(f"Precomputing text tokens for {len(tasks)} tasks...")
-    encoder = build_text_encoder(text_encoder_name, d_model)
+    encoder    = build_text_encoder(text_encoder_name, d_model)
     token_dict = {}
 
     for task_id, task_name in enumerate(tasks):
         instruction = TASK_INSTRUCTIONS[task_name]
         ids, mask   = tokenize_instruction(instruction)
         with torch.no_grad():
-            tokens = encoder(ids, mask)          # (1, L, d_model)
+            tokens = encoder(ids, mask)
         token_dict[task_id] = tokens.detach()
         print(f"  [{task_id}] {task_name}: '{instruction}'")
 
     del encoder
     print("Text encoder freed from memory.")
-    return token_dict  # {task_id: (1, L, d_model)}
+    return token_dict
 
 
 def run_epoch(model, loader, token_dict, optimizer=None):
@@ -137,13 +122,11 @@ def run_epoch(model, loader, token_dict, optimizer=None):
             img   = img.to(DEVICE)
             state = state.to(DEVICE)
             act   = act.to(DEVICE)
-            B     = img.size(0)
 
-            # build per-sample text tokens from task_ids
             text_tokens = torch.cat([
                 token_dict[t.item()].expand(1, -1, -1)
                 for t in task_ids
-            ], dim=0).to(DEVICE)   # (B, L, d_model)
+            ], dim=0).to(DEVICE)
 
             loss = model.loss(img, text_tokens, state, act)
 
@@ -161,23 +144,6 @@ def run_epoch(model, loader, token_dict, optimizer=None):
 
 def main():
     os.makedirs(SAVE_DIR, exist_ok=True)
-
-    wandb.init(
-        project=WANDB_PROJECT,
-        config={
-            "epochs":         EPOCHS,
-            "batch_size":     BATCH_SIZE,
-            "lr":             LR,
-            "state_dim":      STATE_DIM,
-            "action_dim":     ACTION_DIM,
-            "d_model":        D_MODEL,
-            "action_horizon": ACTION_HORIZON,
-            "obs_horizon":    OBS_HORIZON,
-            "vision_encoder": VISION_ENCODER,
-            "text_encoder":   TEXT_ENCODER,
-            "tasks":          TASKS,
-        }
-    )
 
     token_dict = precompute_text_tokens(TASKS, TEXT_ENCODER, D_MODEL)
 
@@ -200,18 +166,43 @@ def main():
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable params: {n_params:,}")
-    wandb.config.update({"trainable_params": n_params})
 
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
-    best_val_loss = float("inf")
+    start_epoch      = 0
+    best_val_loss    = float("inf")
+    patience_counter = 0
 
-    # change the for loop from
-#    for epoch in range(EPOCHS):
-    # to
+    if RESUME_FROM and os.path.exists(RESUME_FROM):
+        ckpt = torch.load(RESUME_FROM, map_location=DEVICE)
+        model.load_state_dict(ckpt["model"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+        start_epoch   = ckpt["epoch"] + 1
+        best_val_loss = ckpt["val_loss"]
+        print(f"Resumed from epoch {start_epoch} | best val: {best_val_loss:.4f}")
+
+    wandb.init(
+        project=WANDB_PROJECT,
+        config={
+            "epochs":           EPOCHS,
+            "batch_size":       BATCH_SIZE,
+            "lr":               LR,
+            "state_dim":        STATE_DIM,
+            "action_dim":       ACTION_DIM,
+            "d_model":          D_MODEL,
+            "action_horizon":   ACTION_HORIZON,
+            "obs_horizon":      OBS_HORIZON,
+            "vision_encoder":   VISION_ENCODER,
+            "text_encoder":     TEXT_ENCODER,
+            "tasks":            TASKS,
+            "patience":         PATIENCE,
+            "trainable_params": n_params,
+            "resume_from":      RESUME_FROM,
+        }
+    )
+
     for epoch in range(start_epoch, EPOCHS):
-
         train_loss = run_epoch(model, train_loader, token_dict, optimizer)
         val_loss   = run_epoch(model, val_loader,   token_dict)
         scheduler.step()
@@ -220,21 +211,23 @@ def main():
         print(f"Epoch {epoch+1:03d}/{EPOCHS} | train {train_loss:.4f} | val {val_loss:.4f} | lr {lr:.2e}")
 
         wandb.log({
-            "train/loss": train_loss,
-            "val/loss":   val_loss,
-            "lr":         lr,
-            "epoch":      epoch + 1,
+            "train/loss":       train_loss,
+            "val/loss":         val_loss,
+            "lr":               lr,
+            "epoch":            epoch + 1,
+            "patience_counter": patience_counter,
         })
 
         if val_loss < best_val_loss:
-            best_val_loss = val_loss
+            best_val_loss    = val_loss
+            patience_counter = 0
             torch.save({
-                "epoch":       epoch,
-                "model":       model.state_dict(),
-                "optimizer":   optimizer.state_dict(),
-                "val_loss":    val_loss,
-                "token_dict":  token_dict,
-                "tasks":       TASKS,
+                "epoch":      epoch,
+                "model":      model.state_dict(),
+                "optimizer":  optimizer.state_dict(),
+                "val_loss":   val_loss,
+                "token_dict": token_dict,
+                "tasks":      TASKS,
                 "config": {
                     "state_dim":      STATE_DIM,
                     "action_dim":     ACTION_DIM,
@@ -247,6 +240,12 @@ def main():
             }, os.path.join(SAVE_DIR, "best.pt"))
             wandb.log({"best_val_loss": val_loss})
             print(f"  ✓ saved best checkpoint (val {val_loss:.4f})")
+        else:
+            patience_counter += 1
+            print(f"  no improvement ({patience_counter}/{PATIENCE})")
+            if patience_counter >= PATIENCE:
+                print(f"Early stopping at epoch {epoch+1} — best val: {best_val_loss:.4f}")
+                break
 
     torch.save(model.state_dict(), os.path.join(SAVE_DIR, "final.pt"))
     wandb.finish()

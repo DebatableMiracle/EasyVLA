@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from encoders.vision.base import BaseVisionEncoder
+import torch.nn.functional as F
 
 
 class VisionEncoderDINOv2(BaseVisionEncoder):
@@ -40,9 +41,23 @@ class VisionEncoderDINOv2(BaseVisionEncoder):
         return 256   # 224x224 / patch_size=14 → 16x16 = 256 tokens
                      # 84x84  / patch_size=14 → 6x6  = 36 tokens — override if needed
 
+    # def forward(self, x):
+    #     x = self.channel_proj(x)                              # (B, 3, H, W)
+    #     x = self.backbone.get_intermediate_layers(x, n=1)[0] # (B, N, 384)
+    #     x = self.projection(x)
+    #     x = self.layernorm(x)
+    #     return x                                              # (B, N, d_model)
+
+
     def forward(self, x):
-        x = self.channel_proj(x)                              # (B, 3, H, W)
-        x = self.backbone.get_intermediate_layers(x, n=1)[0] # (B, N, 384)
+        h, w = x.shape[-2:]
+        new_h = (h // 14) * 14
+        new_w = (w // 14) * 14
+        if new_h != h or new_w != w:
+            x = F.interpolate(x, size=(new_h, new_w),
+                            mode="bilinear", align_corners=False)
+        x = self.channel_proj(x)
+        x = self.backbone.get_intermediate_layers(x, n=1)[0]
         x = self.projection(x)
         x = self.layernorm(x)
-        return x                                              # (B, N, d_model)
+        return x
