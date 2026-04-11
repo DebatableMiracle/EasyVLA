@@ -5,12 +5,20 @@ from encoders.text.distilbert     import TextEncoderDistilbert
 from encoders.text.smollm         import TextEncoderSmolLM
 from encoders.text.bert_tiny      import TextEncoderBERTTiny
 from encoders.state.mlp           import StateEncoderMLP
+from encoders.vision.clip import VisionEncoderCLIP
+from encoders.text.clip import TextEncoderCLIP
+
+# in build_vision_encoder:
+
+# in build_text_encoder:
 
 
 VISION_ENCODERS = {
     "resnet18":     VisionEncoderResnet18,
     "efficientnet": VisionEncoderEfficientNet,
     "dinov2":       VisionEncoderDINOv2,
+    "clip": lambda d_model, obs_horizon: VisionEncoderCLIP(d_model, obs_horizon),
+
     # "clip":    VisionEncoderCLIP,    # coming soon
     # "siglip":  VisionEncoderSigLIP,  # coming soon
     # "r3m":     VisionEncoderR3M,     # coming soon
@@ -21,6 +29,7 @@ TEXT_ENCODERS = {
     "distilbert": TextEncoderDistilbert,
     "smollm":     TextEncoderSmolLM,
     "bert_tiny":  TextEncoderBERTTiny,
+    "clip": lambda d_model: TextEncoderCLIP(d_model),
     # "clip": TextEncoderCLIP,   # coming soon
     # "t5":   TextEncoderT5,     # coming soon
 }
